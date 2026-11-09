@@ -7,9 +7,23 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compile dylib
-        run: xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -DTT_DEBUG=0 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -install_name @rpath/TTFullscreen.dylib -o TTFullscreen.dylib TTFullscreen.m
+
+      - name: Compile A (debug on, force frame on)
+        run: |
+          mkdir -p outA
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -DTT_DEBUG=1 -DTT_FORCE_FRAME=1 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -install_name @rpath/TTFullscreen.dylib -o outA/TTFullscreen.dylib TTFullscreen.m
+
+      - name: Compile B (debug on, force frame off)
+        run: |
+          mkdir -p outB
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -DTT_DEBUG=1 -DTT_FORCE_FRAME=0 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -install_name @rpath/TTFullscreen.dylib -o outB/TTFullscreen.dylib TTFullscreen.m
+
       - uses: actions/upload-artifact@v4
         with:
-          name: TTFullscreen
-          path: TTFullscreen.dylib
+          name: TTFullscreen-A
+          path: outA/TTFullscreen.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTFullscreen-B
+          path: outB/TTFullscreen.dylib
