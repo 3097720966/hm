@@ -1,4 +1,4 @@
-// TTFullscreen v2
+// TTFullscreen v3
 // 目的：去掉 TauriTavern 的上下黑边（WKWebView 被缩在安全区里，约 47pt/34pt）。
 // v2 做法（多管齐下）：
 //  1. 给 rootViewController 设置负的 additionalSafeAreaInsets，抵消系统安全区
@@ -6,7 +6,7 @@
 //  2. 把 WKWebView 及其所有父视图的 frame 强制撑满窗口（frame 布局的情况靠这条）
 //  3. 0.5s 定时器 + 布局钩子反复执行，防止被原生代码改回去
 //  4. 把真实安全区写进网页的 CSS 变量 --tt-inset-top / --tt-inset-bottom
-//  5. 启动 3 秒后出现绿色调试浮层 "TTFullscreen v2"（点一下消失）。
+//  5. 启动 3 秒后出现绿色调试浮层 "TTFullscreen v3"（点一下消失）。
 //     没看到这个浮层 = dylib 根本没被加载（问题在注入，不在代码）。
 // 不要浮层：编译时加 -DTT_DEBUG=0
 
@@ -53,7 +53,17 @@ static UIWindow *TTWindow(void) {
             if (!fallback) fallback = w;
         }
     }
-    return fallback;
+    if (fallback) return fallback;
+    // 没有 UIScene（tao/wry 常见）：走旧接口
+    UIApplication *app = UIApplication.sharedApplication;
+    for (UIWindow *w in app.windows) {
+        if (w.isKeyWindow) return w;
+        if (!fallback) fallback = w;
+    }
+    if (fallback) return fallback;
+    id<UIApplicationDelegate> d = app.delegate;
+    if ([d respondsToSelector:@selector(window)]) return [d window];
+    return nil;
 }
 
 static WKWebView *TTFindWeb(UIView *v) {
@@ -165,7 +175,7 @@ static void TTSwizzle(Class c, SEL orig, SEL repl) {
 
 #if TT_DEBUG
 static NSString *TTDump(UIWindow *win) {
-    NSMutableString *s = [NSMutableString stringWithString:@"TTFullscreen v2 (loaded)\n"];
+    NSMutableString *s = [NSMutableString stringWithString:@"TTFullscreen v3 (loaded)\n"];
     [s appendFormat:@"screen %@\n", NSStringFromCGRect(UIScreen.mainScreen.bounds)];
     [s appendFormat:@"window %@\n", NSStringFromCGRect(win.frame)];
     [s appendFormat:@"devSafe %@\n", NSStringFromUIEdgeInsets(win.safeAreaInsets)];
@@ -212,7 +222,7 @@ static void TTShowOverlay(int retries) {
 
 __attribute__((constructor)) static void TTInit(void) {
     @autoreleasepool {
-        TTLog(@"TTFullscreen v2 constructor ran");
+        TTLog(@"TTFullscreen v3 constructor ran");
         Class c = WKWebView.class;
         TTSwizzle(c, @selector(layoutSubviews), @selector(tt_layoutSubviews));
         TTSwizzle(c, @selector(setFrame:), @selector(tt_setFrame:));
