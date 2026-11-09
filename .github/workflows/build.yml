@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Compile dylib
-        run: xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -install_name @rpath/TTFullscreen.dylib -o TTFullscreen.dylib TTFullscreen.m
+        run: xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -fobjc-arc -DTT_DEBUG=0 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -install_name @rpath/TTFullscreen.dylib -o TTFullscreen.dylib TTFullscreen.m
       - uses: actions/upload-artifact@v4
         with:
           name: TTFullscreen
