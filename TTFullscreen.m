@@ -1,8 +1,14 @@
-// TTFullscreen v1
-// 目的：让 TauriTavern 的 WKWebView 铺满整个窗口（去掉上下黑边）。
-// 做法：在 WKWebView 布局时，把它和它的所有父视图的 frame 撑到窗口大小。
-// v1 带一个调试浮层（启动 5 秒后出现，点一下消失），用来查看视图层级。
-// 不想要浮层：编译时加 -DTT_DEBUG=0。
+// TTFullscreen v2
+// 目的：去掉 TauriTavern 的上下黑边（WKWebView 被缩在安全区里，约 47pt/34pt）。
+// v2 做法（多管齐下）：
+//  1. 给 rootViewController 设置负的 additionalSafeAreaInsets，抵消系统安全区
+//     （Auto Layout 钉在 safeAreaLayoutGuide 上的情况靠这条解决）
+//  2. 把 WKWebView 及其所有父视图的 frame 强制撑满窗口（frame 布局的情况靠这条）
+//  3. 0.5s 定时器 + 布局钩子反复执行，防止被原生代码改回去
+//  4. 把真实安全区写进网页的 CSS 变量 --tt-inset-top / --tt-inset-bottom
+//  5. 启动 3 秒后出现绿色调试浮层 "TTFullscreen v2"（点一下消失）。
+//     没看到这个浮层 = dylib 根本没被加载（问题在注入，不在代码）。
+// 不要浮层：编译时加 -DTT_DEBUG=0
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
@@ -13,6 +19,30 @@
 #endif
 
 static BOOL gApplying = NO;
+static NSUInteger gTicks = 0;
+static NSUInteger gLogCount = 0;
+
+static void TTLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1, 2);
+static void TTLog(NSString *fmt, ...) {
+    if (gLogCount > 150) return;
+    gLogCount++;
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (!dir) return;
+    NSString *path = [dir stringByAppendingPathComponent:@"TTFullscreen.log"];
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) {
+        [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        return;
+    }
+    [fh seekToEndOfFile];
+    [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh closeFile];
+}
 
 static UIWindow *TTWindow(void) {
     UIWindow *fallback = nil;
@@ -35,12 +65,24 @@ static WKWebView *TTFindWeb(UIView *v) {
     return nil;
 }
 
-// 把 webview 及其所有祖先视图撑满窗口
+// 抵消系统安全区（rootVC 以及它 present 出来的 VC）
+static void TTCancelSafe(UIWindow *win) {
+    UIEdgeInsets dev = win.safeAreaInsets; // 设备级安全区，不含 VC 的 additional
+    UIEdgeInsets want = UIEdgeInsetsMake(-dev.top, -dev.left, -dev.bottom, -dev.right);
+    UIViewController *vc = win.rootViewController;
+    while (vc) {
+        if (!UIEdgeInsetsEqualToEdgeInsets(vc.additionalSafeAreaInsets, want)) {
+            vc.additionalSafeAreaInsets = want;
+            TTLog(@"additionalSafeAreaInsets -> %@ on %@", NSStringFromUIEdgeInsets(want), NSStringFromClass(vc.class));
+        }
+        vc = vc.presentedViewController;
+    }
+}
+
+// 把 webview 及所有祖先视图撑满窗口
 static void TTFill(WKWebView *wv) {
-    if (gApplying) return;
     UIWindow *win = wv.window;
     if (!win) return;
-    gApplying = YES;
 
     UIScrollView *sc = wv.scrollView;
     if (sc.contentInsetAdjustmentBehavior != UIScrollViewContentInsetAdjustmentNever) {
@@ -52,12 +94,36 @@ static void TTFill(WKWebView *wv) {
         UIView *sv = v.superview;
         if (!sv) break;
         CGRect target = [sv convertRect:win.bounds fromView:win];
-        CGRect f = v.frame;
-        // 只放大，不缩小；已经一样就不动
-        if (!CGRectEqualToRect(f, target) && CGRectContainsRect(target, f)) {
+        if (!CGRectEqualToRect(v.frame, target)) {
+            TTLog(@"frame %@ %@ -> %@", NSStringFromClass(v.class),
+                  NSStringFromCGRect(v.frame), NSStringFromCGRect(target));
             v.frame = target;
         }
         v = sv;
+    }
+}
+
+static void TTInjectInsets(WKWebView *wv, UIWindow *win) {
+    UIEdgeInsets d = win.safeAreaInsets;
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){var s=document.documentElement&&document.documentElement.style;"
+        @"if(!s)return;"
+        @"s.setProperty('--tt-inset-top','%.0fpx');"
+        @"s.setProperty('--tt-inset-bottom','%.0fpx');})();",
+        d.top, d.bottom];
+    [wv evaluateJavaScript:js completionHandler:nil];
+}
+
+static void TTApplyAll(void) {
+    if (gApplying) return;
+    UIWindow *win = TTWindow();
+    if (!win) return;
+    gApplying = YES;
+    TTCancelSafe(win);
+    WKWebView *wv = TTFindWeb(win);
+    if (wv) {
+        TTFill(wv);
+        if (gTicks % 2 == 0) TTInjectInsets(wv, win);
     }
     gApplying = NO;
 }
@@ -68,11 +134,21 @@ static void TTFill(WKWebView *wv) {
 @implementation WKWebView (TTFullscreen)
 - (void)tt_layoutSubviews {
     [self tt_layoutSubviews];
-    TTFill(self);
+    if (!gApplying) {
+        gApplying = YES;
+        UIWindow *win = self.window;
+        if (win) { TTCancelSafe(win); TTFill(self); }
+        gApplying = NO;
+    }
 }
 - (void)tt_setFrame:(CGRect)frame {
     [self tt_setFrame:frame];
-    TTFill(self);
+    if (!gApplying) {
+        gApplying = YES;
+        UIWindow *win = self.window;
+        if (win) TTFill(self);
+        gApplying = NO;
+    }
 }
 @end
 
@@ -89,20 +165,19 @@ static void TTSwizzle(Class c, SEL orig, SEL repl) {
 
 #if TT_DEBUG
 static NSString *TTDump(UIWindow *win) {
-    NSMutableString *s = [NSMutableString stringWithString:@"TTFullscreen v1\n"];
+    NSMutableString *s = [NSMutableString stringWithString:@"TTFullscreen v2 (loaded)\n"];
     [s appendFormat:@"screen %@\n", NSStringFromCGRect(UIScreen.mainScreen.bounds)];
     [s appendFormat:@"window %@\n", NSStringFromCGRect(win.frame)];
-    [s appendFormat:@"winSafe %@\n", NSStringFromUIEdgeInsets(win.safeAreaInsets)];
+    [s appendFormat:@"devSafe %@\n", NSStringFromUIEdgeInsets(win.safeAreaInsets)];
     UIViewController *vc = win.rootViewController;
     if (vc) {
-        [s appendFormat:@"rootVC %@ addSafe %@\n", NSStringFromClass(vc.class),
+        [s appendFormat:@"rootVC %@\naddSafe %@\n", NSStringFromClass(vc.class),
                         NSStringFromUIEdgeInsets(vc.additionalSafeAreaInsets)];
     }
     WKWebView *wv = TTFindWeb(win);
     if (!wv) { [s appendString:@"no WKWebView\n"]; return s; }
     [s appendFormat:@"webSafe %@\n", NSStringFromUIEdgeInsets(wv.safeAreaInsets)];
-    [s appendFormat:@"adjust %ld\n", (long)wv.scrollView.contentInsetAdjustmentBehavior];
-    [s appendString:@"-- 视图链 (webview -> window) --\n"];
+    [s appendString:@"-- webview -> window --\n"];
     for (UIView *v = wv; v; v = v.superview) {
         [s appendFormat:@"%@ %@ ar=%d\n", NSStringFromClass(v.class),
                         NSStringFromCGRect(v.frame), (int)v.translatesAutoresizingMaskIntoConstraints];
@@ -112,9 +187,9 @@ static NSString *TTDump(UIWindow *win) {
 
 static void TTShowOverlay(int retries) {
     UIWindow *win = TTWindow();
-    if (!win || !TTFindWeb(win)) {
+    if (!win) {
         if (retries > 0) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                 TTShowOverlay(retries - 1);
             });
         }
@@ -137,12 +212,19 @@ static void TTShowOverlay(int retries) {
 
 __attribute__((constructor)) static void TTInit(void) {
     @autoreleasepool {
+        TTLog(@"TTFullscreen v2 constructor ran");
         Class c = WKWebView.class;
         TTSwizzle(c, @selector(layoutSubviews), @selector(tt_layoutSubviews));
         TTSwizzle(c, @selector(setFrame:), @selector(tt_setFrame:));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+                gTicks++;
+                TTApplyAll();
+            }];
+        });
 #if TT_DEBUG
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            TTShowOverlay(3);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            TTShowOverlay(5);
         });
 #endif
     }
